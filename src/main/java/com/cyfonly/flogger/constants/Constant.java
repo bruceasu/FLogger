@@ -1,7 +1,7 @@
 package com.cyfonly.flogger.constants;
+import com.cyfonly.flogger.utils.CommUtil;
 import java.util.HashMap;
 import java.util.Map;
-import com.cyfonly.flogger.utils.CommUtil;
 
 /**
  * 常量

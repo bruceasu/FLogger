@@ -36,4 +36,6 @@ public class LogFileItem {
 	/** 当前已缓存大小 */
 	public long currCacheSize = 0;
 
+	/**上次生成文件时间*/
+	public long lastTimestamp = 0;
 }

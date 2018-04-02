@@ -1,5 +1,8 @@
 package com.cyfonly.flogger.strategy;
 
+import com.cyfonly.flogger.constants.Constant;
+import com.cyfonly.flogger.utils.CommUtil;
+import com.cyfonly.flogger.utils.TimeUtil;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -8,9 +11,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import com.cyfonly.flogger.constants.Constant;
-import com.cyfonly.flogger.utils.CommUtil;
-import com.cyfonly.flogger.utils.TimeUtil;
+
 
 /**
  * 日志管理线程
@@ -26,17 +27,19 @@ public class LogManager extends Thread {
 	private Map<String,LogFileItem> logFileMap = new ConcurrentHashMap<String,LogFileItem>();
 	
 	/** 日志写入的间隔时间 */
-	public final static long WRITE_LOG_INV_TIME = CommUtil.getConfigByLong("WRITE_LOG_INV_TIME", 1000);
+	public static long WRITE_LOG_INV_TIME = CommUtil.getConfigByLong("WRITE_LOG_INV_TIME", 1000);
 	
 	/** 单个日志文件的大小(默认为10M) */
-	public final static long SINGLE_LOG_FILE_SIZE = CommUtil.getConfigByLong("SINGLE_LOG_FILE_SIZE", 1024*1024*10);
+	public static long SINGLE_LOG_FILE_SIZE = CommUtil.getConfigByLong("SINGLE_LOG_FILE_SIZE", 1024*1024*10);
 	
 	/** 缓存大小(默认10KB) */
-	public final static long SINGLE_LOG_CACHE_SIZE = CommUtil.getConfigByLong("SINGLE_LOG_CACHE_SIZE", 1024*10);
+	public static long SINGLE_LOG_CACHE_SIZE = CommUtil.getConfigByLong("SINGLE_LOG_CACHE_SIZE", 1024*10);
 	
 	/** 是否运行 */
 	private boolean bIsRun = true ;
-	
+
+	protected Object flushLock = new Object();
+
 	public LogManager(){
 		
 	}
@@ -84,6 +87,7 @@ public class LogManager extends Thread {
 	}
 	
 	/** 线程方法 */
+	@Override
 	public void run(){
 		int i = 0 ;
 		while(bIsRun){
@@ -101,11 +105,17 @@ public class LogManager extends Thread {
 			}
 		}
 	}
-	
+
+	public void cancel() {
+		bIsRun = false;
+		interrupt();
+	}
 	/** 关闭方法 */
     public void close(){
-    	bIsRun = false;
+	    System.out.println("关闭日志线程...");
+	    cancel();
     	try{
+    		flush(true);
     		flush(true);
     	}catch(Exception e){
     		System.out.println("关闭日志服务错误...");
@@ -117,40 +127,49 @@ public class LogManager extends Thread {
      * 输出缓存的日志到文件
      * @param bIsForce 是否强制将缓存中的日志输出到文件
      */ 
-    private void flush(boolean bIsForce) throws IOException{
-    	long currTime = System.currentTimeMillis();
-    	Iterator<String> iter = logFileMap.keySet().iterator();
-    	while(iter.hasNext()){
-    		LogFileItem lfi = logFileMap.get(iter.next());
-    		if(currTime >= lfi.nextWriteTime || SINGLE_LOG_CACHE_SIZE <= lfi.currCacheSize || bIsForce == true){
-    			//获得需要进行输出的缓存列表
-    			ArrayList<StringBuffer> alWrtLog = null;
-    			synchronized(lfi){
-    				if(lfi.currLogBuff == 'A'){
-    					alWrtLog = lfi.alLogBufA;
-    					lfi.currLogBuff = 'B';
-    				}else{
-    					alWrtLog = lfi.alLogBufB;
-    					lfi.currLogBuff = 'A';
-    				}
-    				lfi.currCacheSize = 0;
-    			}
-    			//创建日志文件
-    			createLogFile(lfi);
-    			//输出日志
-    			int iWriteSize = writeToFile(lfi.fullLogFileName,alWrtLog);
-    			lfi.currLogSize += iWriteSize;
-    		}
-    	}
+    protected void flush(boolean bIsForce) throws IOException{
+		synchronized (flushLock) {
+			Iterator<String> iter = logFileMap.keySet().iterator();
+			while (iter.hasNext()) {
+				LogFileItem lfi = logFileMap.get(iter.next());
+				flushLogFileItem(lfi, bIsForce);
+			}
+		}
     }
-    
-    /**
+
+	private void flushLogFileItem(LogFileItem lfi, boolean bIsForce) throws IOException {
+		long currTime = System.currentTimeMillis();
+		if(currTime >= lfi.nextWriteTime || SINGLE_LOG_CACHE_SIZE <= lfi.currCacheSize || bIsForce == true){
+			//获得需要进行输出的缓存列表
+			ArrayList<StringBuffer> alWrtLog = null;
+			synchronized(lfi){
+				if(lfi.currLogBuff == 'A'){
+					alWrtLog = lfi.alLogBufA;
+					lfi.currLogBuff = 'B';
+				}else{
+					alWrtLog = lfi.alLogBufB;
+					lfi.currLogBuff = 'A';
+				}
+				lfi.currCacheSize = 0;
+			}
+			while(!alWrtLog.isEmpty()) {
+				//创建日志文件
+				createLogFile(lfi);
+				//输出日志
+				int iWriteSize = writeToFile(lfi.fullLogFileName,alWrtLog);
+				lfi.currLogSize += iWriteSize;
+			}
+
+		}
+	}
+
+	/**
      * 创建日志文件
      * @param lfi
      */
-    private void createLogFile(LogFileItem lfi){
+    protected void createLogFile(LogFileItem lfi){
     	//当前系统日期
-    	String currPCDate = TimeUtil.getPCDate('-');
+    	String currPCDate = TimeUtil.getPCDateISO();
     	
     	//判断日志root路径是否存在，不存在则先创建
     	File rootDir = new File(Constant.CFG_LOG_PATH);
@@ -159,7 +178,7 @@ public class LogManager extends Thread {
     	}
     	
     	//如果超过单个文件大小，则拆分文件
-    	if(lfi.fullLogFileName != null && lfi.fullLogFileName.length() > 0 && lfi.currLogSize >= LogManager.SINGLE_LOG_FILE_SIZE ){
+    	if(lfi.fullLogFileName != null && lfi.fullLogFileName.length() > 0 && lfi.currLogSize >= SINGLE_LOG_FILE_SIZE ){
     		File oldFile = new File(lfi.fullLogFileName);
     		if(oldFile.exists()){
         		String newFileName = Constant.CFG_LOG_PATH + "/" + lfi.lastPCDate + "/" + lfi.logFileName + "_" + TimeUtil.getPCDate() + "_"+ TimeUtil.getCurrTime() + ".log";
@@ -195,25 +214,28 @@ public class LogManager extends Thread {
      * @param sbLogMsg      日志文件内容
      * @return 返回输出内容大小
      */
-    private int writeToFile(String sFullFileName,ArrayList<StringBuffer> sbLogMsg) throws IOException{
+    protected int writeToFile(String sFullFileName, ArrayList<StringBuffer> sbLogMsg) throws IOException{
     	int size = 0;
-    	OutputStream fout = null;
-    	try{
-    	    fout = new FileOutputStream(sFullFileName, true);	
-    	    for(int i = 0; i < sbLogMsg.size(); i++){
-                StringBuffer logMsg = sbLogMsg.get(i);
-                byte[] tmpBytes = CommUtil.StringToBytes(logMsg.toString());
-                fout.write(tmpBytes);
-                size += tmpBytes.length;
-             }
+
+	    File fullFile = new File(sFullFileName);
+	    try (OutputStream fout = new FileOutputStream(sFullFileName, true)){
+		    Iterator<StringBuffer> iterator = sbLogMsg.iterator();
+		    while(iterator.hasNext()) {
+			    StringBuffer logMsg = iterator.next();
+			    byte[] tmpBytes = CommUtil.StringToBytes(logMsg.toString());
+			    fout.write(tmpBytes);
+			    size += tmpBytes.length;
+			    iterator.remove();
+			    // check file size
+			    if (fullFile.length() + size >= SINGLE_LOG_FILE_SIZE) {
+			    	// for new file
+				    fout.flush();
+				    return size;
+			    }
+		    }
             fout.flush();
-            sbLogMsg.clear();
     	}catch(Exception e){
     	    e.printStackTrace();
-    	}finally{
-    		if(fout != null){
-    			fout.close();
-    		}
     	}
     	return size;
     }
